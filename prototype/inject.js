@@ -30,7 +30,9 @@
         genres: [],          // available genres
         genresFor: undefined,// parentId the genre list belongs to
         loadingFor: undefined,
-        lastQuery: null
+        lastQuery: null,
+        result: null,        // last resolved intersection, for display
+        resolving: false
     };
 
     var probe = {
@@ -45,6 +47,11 @@
     };
     window.__JF_PROBE__ = probe;
     window.__JF_INTERSECT__ = state;
+    // Exposed so the harness can drive the intersection directly and compare
+    // it against the server-side ground truth, independent of the panel UI.
+    window.__JF_RESOLVE__ = function (names, opts) {
+        return resolveIntersection(names, opts);
+    };
 
     /**
      * Locate the *filter* popover by its content, not by a generic class:
@@ -70,6 +77,22 @@
         if (style) n.style.cssText = style;
         if (text != null) n.textContent = text;
         return n;
+    }
+
+    function onResolve() {
+        if (state.selected.length < 2) {
+            state.result = { error: 'select 2 or more genres' };
+            syncPanel();
+            return;
+        }
+        state.resolving = true;
+        state.result = null;
+        syncPanel();
+        resolveIntersection(state.selected.slice()).then(function (r) {
+            state.resolving = false;
+            state.result = r;
+            syncPanel();
+        });
     }
 
     function onToggle(name, checked) {
@@ -98,6 +121,16 @@
 
         wrap.appendChild(el('div', 'margin-top:6px;opacity:.85;word-break:break-all',
                             describeQuery())).setAttribute(QUERY_ATTR, '1');
+
+        var btn = el('button', 'margin-top:6px;padding:4px 8px;cursor:pointer',
+                     'Resolve intersection');
+        btn.setAttribute('data-jf-intersect', 'resolve');
+        btn.addEventListener('click', onResolve);
+        wrap.appendChild(btn);
+
+        var out = el('div', 'margin-top:6px;opacity:.9;word-break:break-word', '');
+        out.setAttribute('data-jf-intersect', 'result');
+        wrap.appendChild(out);
 
         renderList(wrap);
         return wrap;
@@ -141,8 +174,103 @@
             if (seen !== state.genres.length) renderList(panel);
             var q = panel.querySelector('[' + QUERY_ATTR + ']');
             if (q) q.textContent = describeQuery();
+            var out = panel.querySelector('[data-jf-intersect=result]');
+            if (out) out.textContent = describeResult();
         }
         return true;
+    }
+
+    function describeResult() {
+        if (state.resolving) return 'resolving…';
+        var r = state.result;
+        if (!r) return '';
+        if (r.error) return 'error: ' + r.error;
+        var lines = r.perGenre.map(function (g) {
+            return g.name + '=' + g.total + (g.truncated ? ' (truncated!)' : '');
+        }).join(', ');
+        var head = 'AND(' + r.genreNames.join(', ') + ') → ' + r.items.length + ' item(s)';
+        if (r.truncated) {
+            head += ' — UNRELIABLE: a genre set was truncated by limit';
+        }
+        var titles = r.items.map(function (i) { return i.name; }).join(', ');
+        return head + '\n  ' + lines + (titles ? '\n  ' + titles : '');
+    }
+
+    /**
+     * Resolve the intersection of N genre selections.
+     *
+     * THE POINT OF THE WHOLE PLUGIN. The server's /Items accepts exactly two
+     * genre groups (`genres`, pipe-delimited names; `genreIds`, comma-delimited
+     * GUIDs) and ANDs across groups, so it can express (A|B) AND (C|D) but NOT
+     * A AND B AND C. This does the N-way case by fetching one complete set per
+     * genre and intersecting on the client.
+     *
+     * The correctness trap, and the reason this returns `truncated` rather than
+     * just a list: intersecting *pages* is meaningless. If a genre has 400
+     * items and we read the first 100, the result is the intersection of the
+     * first 100 of each — a number that looks plausible and is simply wrong.
+     * So each set is compared against its own TotalRecordCount and the caller
+     * is told when a set was incomplete. A production implementation must
+     * either fetch ids without paging or push the intersection to the server.
+     */
+    function resolveIntersection(genreNames, opts) {
+        opts = opts || {};
+        var limit = opts.limit || 1000;
+        var pid = currentParentId();
+
+        return new Promise(function (resolve) {
+            whenApiReady(function (client) {
+                var uid = client.getCurrentUserId ? client.getCurrentUserId() : null;
+                if (!uid) { resolve({ error: 'not signed in' }); return; }
+
+                function fetchOne(name) {
+                    var q = '/Items?userId=' + encodeURIComponent(uid) +
+                            '&recursive=true&includeItemTypes=Movie' +
+                            '&enableImages=false&enableUserData=false' +
+                            '&limit=' + limit +
+                            '&genres=' + encodeURIComponent(name);
+                    if (pid) q += '&parentId=' + encodeURIComponent(pid);
+                    return client.getJSON(client.getUrl(q)).then(function (res) {
+                        var items = res.Items || [];
+                        return {
+                            name: name,
+                            total: res.TotalRecordCount,
+                            returned: items.length,
+                            truncated: res.TotalRecordCount > items.length,
+                            items: items
+                        };
+                    });
+                }
+
+                Promise.all(genreNames.map(fetchOne)).then(function (sets) {
+                    var out = {
+                        genreNames: genreNames.slice(),
+                        perGenre: sets.map(function (s) {
+                            return { name: s.name, total: s.total,
+                                     returned: s.returned, truncated: s.truncated };
+                        }),
+                        truncated: sets.some(function (s) { return s.truncated; }),
+                        items: []
+                    };
+                    if (sets.length) {
+                        // Intersect on Id, keeping the richest name/Id record.
+                        var byId = {};
+                        sets.forEach(function (s) {
+                            s.items.forEach(function (it) { byId[it.Id] = it; });
+                        });
+                        var first = sets[0].items.map(function (i) { return i.Id; });
+                        out.items = first.filter(function (id) {
+                            return sets.every(function (s) {
+                                return s.items.some(function (i) { return i.Id === id; });
+                            });
+                        }).map(function (id) {
+                            return { id: id, name: byId[id] && byId[id].Name };
+                        });
+                    }
+                    resolve(out);
+                }).catch(function (e) { resolve({ error: String(e) }); });
+            });
+        });
     }
 
     function mount() {
@@ -175,12 +303,26 @@
             return true;
         }
 
+        // Placement is selectable so the harness can measure the alternatives
+        // against the popover's fixed 250px / maxHeight:50% geometry.
+        //   after-accordion : below every accordion (first attempt; scrolls out of view)
+        //   prepend         : first thing in the popover, always visible
+        //   inside-genres   : inside the Genres accordion, under the native list
+        var mode = window.__JF_PLACEMENT__ || 'after-accordion';
+        var panel = buildPanel();
         var accordion = anchor.closest('.MuiAccordion-root');
-        if (accordion) {
-            accordion.insertAdjacentElement('afterend', buildPanel());
+
+        if (mode === 'prepend') {
+            container.insertBefore(panel, container.firstChild);
+        } else if (mode === 'inside-genres' && accordion) {
+            var details = accordion.querySelector('.MuiAccordionDetails-root') || accordion;
+            details.appendChild(panel);
+        } else if (accordion) {
+            accordion.insertAdjacentElement('afterend', panel);
         } else {
-            container.appendChild(buildPanel());
+            container.appendChild(panel);
         }
+        probe.placement = mode;
         probe.mounts += 1;
         probe.mounted = true;
         return true;

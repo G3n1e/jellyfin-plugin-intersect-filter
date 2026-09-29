@@ -130,7 +130,7 @@ which is precisely the option §5 rejects as buying nothing over the raw API.
 | Does a node appended inside the filter popover survive a React re-render caused by changing a native filter? | **Yes** |
 | Does it survive the popover closing? | **No** — destroyed, as predicted |
 | Does a MutationObserver re-mount it on reopen, with state intact? | **Yes** |
-| Is it visible without scrolling? | **No** — see §5 |
+| Is it visible without scrolling? | **Placement-dependent; no good placement exists** — §6E |
 
 **The structural fact that drives the design:** the native filter panel is a MUI
 `<Popover id="filter-popover">` (`filter/FilterButton.tsx:197-218`) with
@@ -160,7 +160,55 @@ stock UI can only ever express a union.
 
 ---
 
-## 5. Problems the prototype surfaced
+## 5. The N-way intersection — the thesis, proven
+
+Everything above is about *how* to inject. This section is about whether the
+thing being injected is worth anything, which had not been tested at all until
+now. `prototype/nway-test.py`, **19/19 checks pass**.
+
+The claim in §2 is that `/Items` ANDs across exactly two genre groups, so
+`Alpha AND Beta AND Gamma` cannot be expressed. Measured live against the
+fixture library:
+
+| Expression | Result | Via |
+|---|---|---|
+| `Alpha\|Beta\|Gamma` (native union) | **6** — the entire library | `genres=` |
+| `(Alpha\|Beta) AND Gamma` | **3** | `genres=` + `genreIds=` — **the ceiling** |
+| `Alpha AND Beta AND Gamma` | **1** — "All Three" | **our resolve, 3 groups** |
+
+Three genres each covering 4 of the 6 fixtures union to everything and intersect
+to a single item. That gap is the product, and it is now demonstrated rather
+than argued.
+
+The 4-way case (`Alpha AND Beta AND Gamma AND Delta`) correctly returns **0**.
+An empty intersection is a real answer, not an error, and code that treats it as
+"no results yet" would be wrong.
+
+**The trap that makes a naive implementation silently wrong.** Intersecting
+*pages* is not intersecting *sets*. Resolving `Alpha AND Beta` with `limit=2`:
+
+```
+perGenre: Alpha total=4 returned=2 truncated=True
+          Beta  total=4 returned=2 truncated=True
+result:   2 items — [All Three, Alpha Beta One]      WRONG (truth is 3)
+```
+
+`Alpha Beta Two` falls outside the page, so the answer is quietly short by one.
+It looks exactly like a normal result: two plausible movies, no error. The same
+call at the default limit returns all three and sets `truncated=False`.
+**A production implementation must never page a set it intends to intersect** —
+it either fetches ids unpaged, or pushes the intersection to the server. The
+client prototype carries an explicit `truncated` flag precisely so this failure
+cannot pass silently, and the harness asserts the flag fires.
+
+**The panel drives the same code path, not just the hook.** Selecting Alpha,
+Beta and Gamma and clicking *Resolve intersection* renders
+`AND(Alpha, Beta, Gamma) → 1 item(s)` — so the UI is wired to the real
+resolution, not a stub.
+
+---
+
+## 6. Problems the prototype surfaced
 
 These are the reason §12.1 demanded a prototype rather than reasoning.
 
@@ -190,17 +238,55 @@ panel is first mounted, which implies a signed-in user on a library page.
 diverge from the client's. `userId` is required; omitting it is not fatal for
 this endpoint on 12.1 but is passed explicitly.
 
-**E. The panel is not visible without scrolling (open — design decision).**
+**E. The popover has no room for this UI (open — design decision).**
 The native paper is `width: 250` and `maxHeight: '50%'`
-(`FilterButton.tsx:210-217`). Measured on a 900px-tall viewport: paper height
-**450px**, `scrollHeight` **632px**, `overflowY: auto`. Our panel sits at
-`top=487 … bottom=629` while the paper's bottom is **539** — so it renders
-**entirely below the visible area** and needs a 182px scroll to reach. It is
-reachable, not unreachable, but a user opening the filter panel does not see it.
+(`FilterButton.tsx:210-217`). Measured on a 900px-tall viewport with the Genres
+accordion expanded — the state a user is actually in when picking genres — the
+paper is **450px** tall with **632px** of content and `overflowY: auto`. It is
+**182px over-subscribed before our panel is added at all**, and our panel is a
+further **142px**.
+
+That reframes the question. Placement does not decide *whether* something falls
+below the fold; it decides *what*. All three variants measured
+(`prototype/placement-test.py`), viewport 1440x900, same payload in all three:
+
+| Placement | Panel top…bottom | Visible on open | Stable across reopen | Ancestor |
+|---|---|---|---|---|
+| `after-accordion` | 487…629 | **No** (paper ends 539) | yes | paper |
+| `prepend` | 97…239 | **Yes** | **yes** | paper (first child) |
+| `inside-genres` | 293…435 → 471…630 | yes → **No** | **No** | *changes between mounts* |
+
+The baseline reproduces the original failure exactly (487/629/539, 182px scroll),
+so the harness is faithful.
+
+`prepend` is the only placement that is both visible and **deterministic** — it
+is the paper's first child on open and on reopen alike, with state intact and
+exactly one panel. But it is visible *at the native filters' expense*: the
+expanded Genres accordion then runs to 637, **98px below the fold**. We would be
+pushing the controls the user opened the panel for out of view to make room for
+ourselves.
+
+`inside-genres` looked attractive and is not viable. Its mount point **depends on
+whether the accordion happened to be expanded at the instant `mount()` ran**:
+- first mount (accordion still collapsed) → `.MuiAccordionDetails-root` does not
+  exist yet, so the code falls back to the accordion root; the panel becomes a
+  sibling of the collapse region;
+- reopen (accordion already expanded) → the panel goes *inside* the region
+  (`MuiAccordionDetails-root` → `MuiCollapse-wrapper` → root).
+
+Two different parents for one mode. Worse, once inside the collapse region the
+panel is destroyed whenever the user collapses Genres — and on reopen it measured
+471…630, i.e. below the fold again. The instability is structural, not a bug to
+patch.
+
+**Conclusion: the native popover cannot host a multi-group builder.** A 250px
+column that already overflows by 182px has no placement that keeps both the
+native genre list and an intersect panel visible. This is evidence *against*
+injecting into the filter popover, and for giving the panel its own surface.
 
 ---
 
-## 6. Recommendations
+## 7. Recommendations
 
 **On the §12.1 decision (inject into browse vs. own page):** injection is
 **technically viable** — the survival mechanism works and is now proven. But it
@@ -214,29 +300,48 @@ actually run:
 - The popover's fixed 250px/50% geometry leaves no good place to put a
   multi-group builder (E).
 
-**Placement, before committing.** Appending after all accordions is the worst
-option tested. Better candidates, in rough order: prepend the panel so it is
-always visible; inject *inside* the expanded Genres accordion beneath the native
-list (matches the user's mental model, costs no extra height, but is only
-visible while that accordion is open — and the accordions are exclusive); or
-give our panel its own scroll container. This should be settled before the
-server controller is written, because it determines how much UI space exists.
+**Placement — settled, against the popover.** All three candidates were
+implemented and measured (§6E). `after-accordion` is deterministic but invisible;
+`inside-genres` is unstable and dies with the accordion; `prepend` is
+deterministic and visible but only by pushing the native genre list below the
+fold. None is good, and the reason is arithmetic rather than taste: the popover
+holds 450px and its own content is 632px. **Do not build the multi-group builder
+inside the filter popover.** Give it its own surface — a dialog, a drawer, or the
+plugin's own page. The popover remains useful as the *entry point* (a button
+that opens that surface), which is cheap and needs no placement decision.
+
+This is settled *before* the server controller is written, as intended: it
+determines how much UI space exists, and the answer is "as much as we want, but
+not inside a 250px popover".
 
 **Do not ship the observer as written.** Observing `document.documentElement`
 with `subtree: true` fires on every mutation in a busy client. It is cheap once
 `mount()` is correct, but the production version should observe a narrower
 subtree and disconnect when the SPA tears down.
 
-**Next cheapest useful step.** The 3-group case is the entire justification for
-the plugin and has *not* been built yet — only the shell UI that would drive it.
-A minimal server controller returning an N-way intersection, called from the
-injected panel and rendered into the existing grid, would prove the whole thesis
-end to end. Note the react-query cache-key hazard in §4 before touching the
-grid.
+**Next step — build the server controller.** The 3-group case is now proven
+client-side (§5), so what remains is moving it server-side where it belongs. The
+client prototype is *not* shippable as-is and should not be mistaken for the
+design: it fetches one full genre set per selected genre and intersects in the
+browser, which is fine for 6 fixtures and untenable for a real library (N
+requests, each unbounded). The server controller does the intersection in one
+query, and is the only place that can report a correct `TotalRecordCount` for a
+paginated result.
+
+Two hazards carry over and must be handled there, not discovered later:
+
+- **Never page a set you intend to intersect** (§5). This is the failure that
+  looks like a normal answer.
+- **The react-query cache key** (§4 of the kickoff) is built before the HTTP
+  layer. If the grid is driven by our query, the key must not collide with the
+  native one, or a filtered result will be served to — or from — the native view.
+
+Once the controller exists, the surface question is already answered: its own
+dialog or page, reached from a button, not the filter popover (§6E).
 
 ---
 
-## 7. Reproducing
+## 8. Reproducing
 
 ```bash
 cd prototype
@@ -245,6 +350,8 @@ docker compose up -d           # throwaway Jellyfin on :8097
 python3 setup-server.py        # wizard, admin, library, scan
 python3 verify-fixtures.py     # server-side counts — all pass
 python3 filter-survival-test.py  # §12.1 injection experiment
+python3 placement-test.py        # §6E placement comparison (3 variants)
+python3 nway-test.py             # §5 the 3-group intersection — 19/19 pass
 ```
 
 The production server on `:8096` is never touched. The prototype instance uses
