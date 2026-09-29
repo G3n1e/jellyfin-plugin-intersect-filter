@@ -1,0 +1,30 @@
+# Throwaway Jellyfin 12.1 instance for prototype work.
+#
+# Deliberately isolated from the production server (container "jellyfin", :8096):
+#   - own container name, own network, own config/cache volumes
+#   - binds :8097
+#   - media mounted read-only from generated fixtures (see make-fixtures.sh)
+#   - restart: "no" so it never survives a reboot by accident
+#
+# Same image as production, so the served jellyfin-web build is identical and
+# injection findings transfer.
+
+services:
+  jellyfin-proto:
+    image: jellyfin/jellyfin:latest
+    container_name: jellyfin-proto
+    restart: "no"
+    init: true
+    mem_limit: 2g
+    ports:
+      - "8097:8096"
+    volumes:
+      - ${JELLYFIN_PROTO_ROOT:-/mnt/SSDs/SSD_1/docker/jellyfin-proto}/config:/config
+      - ${JELLYFIN_PROTO_ROOT:-/mnt/SSDs/SSD_1/docker/jellyfin-proto}/cache:/cache
+      - ${JELLYFIN_PROTO_ROOT:-/mnt/SSDs/SSD_1/docker/jellyfin-proto}/media:/media:ro
+    environment:
+      - TZ=Africa/Lagos
+
+networks:
+  default:
+    name: jellyfin-proto-net
