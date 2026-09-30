@@ -1,0 +1,15 @@
+{
+  "category": "General",
+  "changelog": "Initial server-side N-way intersection endpoint.",
+  "description": "Intersects multiple values from the same category (genre AND genre AND ...) instead of unioning them, removing the stock two-group ceiling on /Items.",
+  "guid": "8f3c1a52-6d24-4b7e-9c8a-1f2e3d4c5b6a",
+  "name": "Better Jellyfin Filtering",
+  "overview": "Filters a library by the intersection of any number of criteria.",
+  "owner": "G3n1e",
+  "targetAbi": "12.1.0.0",
+  "timestamp": "2026-09-30T00:00:00.0000000Z",
+  "version": "0.1.0.0",
+  "status": "Active",
+  "autoUpdate": false,
+  "assemblies": []
+}

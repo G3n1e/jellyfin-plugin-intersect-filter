@@ -78,6 +78,27 @@ Confirms §3 exactly.
 filter is discarded with **no error**. This is asserted permanently as a
 regression case.
 
+**Root cause of the delimiter trap — a doc/code mismatch, found while writing the
+controller.** `Jellyfin.Api/Controllers/ItemsController.cs` documents `genreIds`
+as *"Optional. If specified, results will be filtered to include only those
+containing the specified genre ids. Pipe ('|') separated for OR results."*
+(line 165) — but binds it with `CommaDelimitedCollectionModelBinder` (line 257),
+which splits on **commas only**. So the documented separator is not the one
+implemented, and `genreIds=<A>|<B>` reaches the binder as a single unparseable
+GUID. `CommaDelimitedCollectionModelBinder.GetParsedResult` catches the
+`FormatException`, logs at **Debug**, and drops the element; with nothing left,
+the parameter binds empty and no filter is applied at all.
+
+The neighbouring `genres` parameter (line 222) correctly uses
+`PipeDelimitedCollectionModelBinder`, which is why `genres=Alpha|Beta` unions and
+`genreIds=<A>|<B>` silently unfilters. `studioIds` has the same doc/code mismatch
+as `genreIds`. The trap is therefore not "Jellyfin mishandles pipes" but "two
+parameters document the same separator and implement different ones", and the
+silence is `CommaDelimitedCollectionModelBinder`'s catch-and-log-at-Debug.
+
+This is the exact failure mode the plugin must not reproduce: unparseable input
+is a hard error there, never a dropped filter (§8).
+
 **The 2-group ceiling holds.** `(Alpha|Beta) AND (Gamma|Delta)` = 3 via the
 API. A true 3-way `Alpha AND Beta AND Gamma` = 1 — **not expressible**, because
 only `genres` and `genreIds` exist. This is the plugin's reason to exist.
@@ -319,29 +340,145 @@ with `subtree: true` fires on every mutation in a busy client. It is cheap once
 `mount()` is correct, but the production version should observe a narrower
 subtree and disconnect when the SPA tears down.
 
-**Next step — build the server controller.** The 3-group case is now proven
-client-side (§5), so what remains is moving it server-side where it belongs. The
-client prototype is *not* shippable as-is and should not be mistaken for the
-design: it fetches one full genre set per selected genre and intersects in the
-browser, which is fine for 6 fixtures and untenable for a real library (N
-requests, each unbounded). The server controller does the intersection in one
-query, and is the only place that can report a correct `TotalRecordCount` for a
-paginated result.
+**The server controller is built and verified** (§8). What remains is the client:
+the injection/UI work of §4–§6, plus the react-query cache key below.
 
-Two hazards carry over and must be handled there, not discovered later:
+Two hazards carried over into the controller and were handled there rather than
+discovered later:
 
-- **Never page a set you intend to intersect** (§5). This is the failure that
-  looks like a normal answer.
+- **Never page a set you intend to intersect** (§5). Handled: criteria are read
+  whole, the cap is enforced by fetching one extra id, and an over-cap criterion
+  is refused rather than truncated.
 - **The react-query cache key** (§4 of the kickoff) is built before the HTTP
-  layer. If the grid is driven by our query, the key must not collide with the
-  native one, or a filtered result will be served to — or from — the native view.
+  layer and is *not* the controller's to solve. If the grid is driven by our
+  query, the key must not collide with the native one, or a filtered result will
+  be served to — or from — the native view.
 
 Once the controller exists, the surface question is already answered: its own
 dialog or page, reached from a button, not the filter popover (§6E).
 
 ---
 
-## 8. Reproducing
+## 8. The server controller (§7 next step, built)
+
+`src/BetterJellyfinFiltering/` — a plugin exposing
+`GET /BetterJellyfinFiltering/Intersect`. `groups` is repeated once per
+AND-group, `|` ORs names within a group, so `?groups=Alpha|Beta&groups=Gamma`
+is `(Alpha OR Beta) AND Gamma` and three repetitions are a 3-way intersection the
+stock API cannot express.
+
+**Shape of the implementation, and the decision behind it.** The service holds an
+`IItemRepository` and asks it one question per criterion, then intersects the id
+sets in memory. The alternative — one hand-written EF Core query over
+`BaseItemEntity`/`ItemValueMap` — was rejected: it would have to re-derive
+placeholder exclusion, genre matching, item-type filters, virtual-item handling
+and user rating/tag restrictions. Intersecting sets the real pipeline produced is
+correct by construction; re-implementing the filters is the "looks plausible, is
+wrong" failure this project exists to remove. The earlier worry that passing a
+large `ItemIds` would produce an enormous `IN (...)` list was disproved:
+`filter.ItemIds` binds as a **single EF collection parameter** (`json_each` /
+`OPENJSON`), so no chunking is needed.
+
+### The bug classes found building it
+
+**1. `filter.ParentId` means *direct children*, and `Recursive` is a no-op.**
+This was the blocker and it is the most dangerous finding here, because the wrong
+version returns a plausible empty answer rather than an error.
+
+```csharp
+// BaseItemRepository.TranslateQuery.cs:320-322
+if (!filter.ParentId.IsEmpty())
+{
+    baseQuery = baseQuery.Where(e => e.ParentId!.Value == filter.ParentId);
+}
+```
+
+`Recursive` is never read anywhere in `Jellyfin.Server.Implementations/` or
+`src/Jellyfin.Database/`. The stock `/Items?parentId=X&recursive=true` works only
+because `LibraryManager` rewrites the query on the way down —
+`GetItemsResult` calls `SetTopParentIdsOrAncestors`, which turns a recursive
+parent into `AncestorIds` (plain folders) or `TopParentIds` (libraries), and a
+BoxSet/Playlist with linked children into `DescendantOfId`. Set `ParentId` and
+hand the query to the repository directly and you get only the folder's immediate
+children: for a library whose movies sit one level deeper, **zero results, no
+error**, indistinguishable from "this filter matched nothing".
+
+`AncestorIds` is a closure in the database — `ItemPersistenceService` writes one
+row per ancestor, not just the parent — so a single id matches at any depth.
+
+The service now mirrors `SetTopParentIdsOrAncestors` in one documented method
+(`ApplyParentScope`), and `GenreIntersectionServiceTests` pins it: a recursive
+folder parent must produce `AncestorIds == [folderId]` and `ParentId == Empty`.
+The mirror is checked against the stock route on real data by the harness, so a
+drift from it fails a test rather than shipping.
+
+**2. An empty `ItemIds` means "no id filter", not "match nothing".**
+`TranslateQuery.cs:1046` guards `if (filter.ItemIds.Length > 0)`, so handing the
+query an empty id array **skips the id filter and returns the whole library**.
+An empty intersection is a real and common outcome (any contradictory filter), so
+this is the difference between "no results" and "everything". The service returns
+before touching the repository when the intersection is empty, and
+`ExecutePage` throws `InvalidOperationException` if it is ever handed an empty
+set — unreachable by construction, asserted because the failure mode is silent.
+
+**3. The stock delimiter trap is a doc/code mismatch** (§2). The plugin reads
+`groups` off `Request.Query` as raw `StringValues` rather than binding a
+`string[]`, because ASP.NET Core splits array-typed query parameters on
+**commas**, which would tear a group apart.
+
+A second, subtler version of the same trap appeared in the plugin's own parser:
+splitting on `|` with `RemoveEmptyEntries` silently *repairs* `Alpha||Beta` into
+`Alpha|Beta` and `Alpha|` into `Alpha`, accepting a filter the caller never
+wrote. Empty entries are now kept and reported. Repairing malformed input is the
+same failure as dropping it.
+
+**4. `Jellyfin.Api` is not a published NuGet package** (404 on nuget.org), so a
+plugin cannot reference it. The one thing needed from it — the
+`"Jellyfin-UserId"` claim string — is duplicated as a literal with a comment;
+it is part of the wire contract between server and client, not an internal
+detail.
+
+**5. `SetUser` is not the same as `ConfigureUserAccess`.** `SetUser` applies the
+parental-rating limit, blocked unrated items and blocked tags. `ILibraryManager.
+ConfigureUserAccess` additionally scopes an otherwise-unscoped query to the
+libraries that user may see. A filter endpoint calling only `SetUser` would
+return items from libraries the user cannot browse.
+
+**6. Jellyfin's REST API serializes PascalCase** (`TotalRecordCount`, `Items`),
+so the plugin's records match that rather than the camelCase default. Error
+payloads are a typed record for the same reason; an anonymous object would
+serialize camelCase and be the one inconsistent response.
+
+### Verification
+
+- `tests/BetterJellyfinFiltering.Tests/` — 40 unit tests over the parser and the
+  service's own algebra, with a faked repository that records what was asked.
+  Covers all four kickoff §8.2 areas: the delimiter asymmetry, AND-vs-OR per
+  category, the empty-list-means-all trap, and pagination bounds.
+- `prototype/server-controller-test.py` — 42 checks against a live server,
+  re-deriving ground truth from the stock API at run time rather than hardcoding
+  it, so a stale expectation cannot make a wrong answer pass. Includes the
+  empty-intersection landmine, the stock 2-group ceiling reproduced side by side,
+  and authorization (401 unauthenticated, 403 for a signed-in caller naming
+  another user).
+
+Both pass. `prototype/deploy-plugin.sh` builds, installs and restarts the
+throwaway instance; production on `:8096` is never touched.
+
+### Still open
+
+- The client half (§4–§6) — injection, the multi-group builder, and its own
+  surface.
+- The react-query cache key (§7) has not been touched; it belongs to the client.
+- Non-recursive queries pass `ParentId` straight through, which is the
+  repository's own meaning of direct-children but skips the in-memory
+  `UserViewBuilder` filtering the stock route applies to children. This differs
+  only for virtual and user-specific items, and library filtering is recursive,
+  so it is recorded rather than worked around.
+
+---
+
+## 9. Reproducing
 
 ```bash
 cd prototype
@@ -352,6 +489,12 @@ python3 verify-fixtures.py     # server-side counts — all pass
 python3 filter-survival-test.py  # §12.1 injection experiment
 python3 placement-test.py        # §6E placement comparison (3 variants)
 python3 nway-test.py             # §5 the 3-group intersection — 19/19 pass
+bash deploy-plugin.sh            # build + install + restart the plugin
+python3 server-controller-test.py  # §8 the server endpoint — 42/42 pass
+```
+
+```bash
+dotnet test tests/BetterJellyfinFiltering.Tests   # §8 unit suite — 40/40 pass
 ```
 
 The production server on `:8096` is never touched. The prototype instance uses
