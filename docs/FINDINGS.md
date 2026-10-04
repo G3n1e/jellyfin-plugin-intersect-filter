@@ -451,10 +451,13 @@ serialize camelCase and be the one inconsistent response.
 
 ### Verification
 
-- `tests/BetterJellyfinFiltering.Tests/` — 40 unit tests over the parser and the
-  service's own algebra, with a faked repository that records what was asked.
-  Covers all four kickoff §8.2 areas: the delimiter asymmetry, AND-vs-OR per
-  category, the empty-list-means-all trap, and pagination bounds.
+- `tests/BetterJellyfinFiltering.Tests/` — 53 unit tests over the parser, the
+  service's own algebra (with a faked repository that records what was asked), and
+  the shell rewriter. Covers all four kickoff §8.2 areas: the delimiter
+  asymmetry, AND-vs-OR per category, the empty-list-means-all trap, and pagination
+  bounds. The rewriter tests also assert against the client script that actually
+  ships — that it is embedded, that it cannot terminate its own `</script>`, and
+  that the route string it calls is the controller's.
 - `prototype/server-controller-test.py` — 42 checks against a live server,
   re-deriving ground truth from the stock API at run time rather than hardcoding
   it, so a stale expectation cannot make a wrong answer pass. Includes the
@@ -467,9 +470,10 @@ throwaway instance; production on `:8096` is never touched.
 
 ### Still open
 
-- The client half (§4–§6) — injection, the multi-group builder, and its own
-  surface.
-- The react-query cache key (§7) has not been touched; it belongs to the client.
+- The assembly name, namespace and route are still `BetterJellyfinFiltering` /
+  `Jellyfin.Plugin.BetterFiltering` while the product is now
+  `jellyfin-plugin-intersect-filter`. The client hardcodes that route, so a
+  rename has to move both together. Flagged, not done.
 - Non-recursive queries pass `ParentId` straight through, which is the
   repository's own meaning of direct-children but skips the in-memory
   `UserViewBuilder` filtering the stock route applies to children. This differs
@@ -478,7 +482,224 @@ throwaway instance; production on `:8096` is never touched.
 
 ---
 
-## 9. Reproducing
+## 9. The client half (§4–§6, built)
+
+The server endpoint returns an intersection; nothing in the web client can *ask*
+for one. This section is how the client was made to, and what only a browser
+could have told us.
+
+### What ships
+
+- `Client/ScriptInjectingStartupFilter.cs` — an `IStartupFilter` registered
+  through `IPluginServiceRegistrator`. It registers its middleware before calling
+  `next(app)`, which puts it **outermost**, ahead of the `UseStaticFiles` that
+  serves the shell.
+- `Client/IndexHtmlRewriter.cs` — the transform, kept pure so it can be unit
+  tested. It inserts before the **last** `</body>`, so a `</body>` quoted inside a
+  comment does not swallow the payload, and it refuses a script containing
+  `</script` rather than shipping a half-executed one.
+- `Client/intersect-client.js` — plain JS, no build step, embedded as a resource
+  and inlined into the shell. Embedded rather than copied next to the DLL because
+  an installed plugin folder is replaced wholesale and the deploy script sweeps
+  only `*.dll`/`*.json`; a loose `.js` would survive an upgrade and go stale
+  against the server it ships with.
+
+### Inline, not a separate asset
+
+The script is inlined as `<script>…</script>`. A `<script src>` would need its
+own fetchable URL, and the shell is served **before sign-in**, so there is no
+token to splice into it — it would need a new anonymous route on the plugin.
+The server also sets **no `Content-Security-Policy`** anywhere (verified by grep
+across the server source), so an inline script is permitted. Inlining removes the
+extra route, the extra round trip and the stale-asset problem at the cost of a
+larger document: the shell went from 5441 bytes on disk to 35324 served at the time of
+writing, and ~47800 once the focus-trap and route-change fixes were added (§9).
+
+Two consequences of rewriting a response rather than a file:
+
+- The middleware strips the request's `Accept-Encoding` and `Range` before
+  calling `next`, because a gzipped body cannot be edited as text and a range
+  fragment does not contain `</body>` at all. Stripping the *response*
+  `Content-Encoding` would be too late to be useful.
+- It then removes `ETag`, `Last-Modified`, `Vary` and `Content-Encoding` from
+  the rewritten response. The server marks the shell `no-cache`, so browsers
+  revalidate it on every load; leaving the validators on would let a revalidation
+  answer 304 against the *patched* entity tag while the browser replays whatever
+  it cached — on the first load after an upgrade, the previous version's shell.
+
+Only `GET` is rewritten. A `HEAD` response has no body and no `</body>` to insert
+before, so the static handler's own length and validators pass through
+untouched — they describe the unpatched file, which is what a `HEAD` of it is.
+
+### Its own results grid, and why that dissolves §7
+
+Kickoff §7 anticipated a fight with the react-query cache key. That fight belongs
+to the rejected XHR-interceptor approach. §4 already showed nothing in the
+client's data path can carry a third criterion — `getFiltersQuery`'s whitelist
+omits `genreIds`, and the `Filters` object has no field for it — so a UI that
+only manipulated the native filter state could not express the request at all.
+The plugin therefore renders its **own** grid from its own fetch, which never
+enters the native query cache. §7 is not solved; it is avoided.
+
+Placement follows the prototype's result: the entry button goes in the native
+filter popover (`#filtersGenres-header`'s paper), and the dialog is appended to
+`document.body`, **outside** `#reactRoot`. React therefore never unmounts it —
+closing the popover that opened it does not close the dialog. Result cards hand
+off to the native `#/details?id=` route rather than reimplementing a detail view.
+
+### The bug that only a browser could find
+
+The observer that mounts the entry button was disconnected on `pagehide` and
+never reconnected. In the real client **the document never reloads** — measured
+at one document, one `body` node across the whole session — and signing in fires
+`pagehide` and then `pageshow` on that *same* document, a millisecond apart. So
+the sequence was: script runs → observer attaches → user signs in → `pagehide`
+disconnects it → the injection is dead for the rest of the page's life. The user
+gets no entry button until they reload by hand.
+
+Every unit test passed throughout. The instrument that caught it was a counter
+set added to the shipped script (`diagnostics.observerFires`), which sat frozen
+at 3 while a probe observer attached alongside it counted 27 mutations in the
+same period. The fix is the pair: disconnect on `pagehide`, `watch()` again on
+`pageshow`.
+
+### The harness proved a three-way OR and called it a pass
+
+The first run of `client-test.py` reported `Alpha or Beta or Gamma: 6 → 6` and
+six results — the union. The fault was the harness: it clicked the first element
+matching `[data-jf-intersect="genre-option"]` with the right text **across the
+whole document**, and every group's option list is in the DOM at once, so group
+0's unfiltered list always matched first and swallowed every genre. The plugin's
+own criteria trace is what made it legible; a bare "6 results" assertion would
+have been tuned until it passed. The options list now carries its group index,
+and the harness scopes to it.
+
+### The settings page
+
+The plugin injects into a shell the web client does not intend anyone to modify, so it
+needs a way to be turned off that does not involve uninstalling it or hand-editing XML —
+and the person who needs that is an administrator on a server other people are using, not
+someone with a shell open. `Configuration/configPage.html` is declared by
+`Plugin.GetPages()` and served by the host out of the assembly at
+`configurationpage?name=Intersect`.
+
+Both halves are load-bearing. **The off switch is the point**: it restores a stock web
+client without touching the endpoint, so a future web-client upgrade that changes the
+shell's shape is a settings change rather than an outage. The page also exposes the three
+bounds (`MaxCriterionIds`, `DefaultPageSize`, `MaxPageSize`), which until now were editable
+only by editing XML.
+
+Two details worth keeping:
+
+- The page is registered as `Intersect`, not as the plugin's display name, because the name
+  becomes a URL parameter and the display name carries an em dash and spaces for no benefit.
+- Configuration is read per request, so the toggle takes effect on the next page load. No
+  restart, which is the difference between a usable escape hatch and a theoretical one.
+
+The page deviates from the official template in one place: the template assigns an
+`<input>`'s value straight onto the config object, but an input hands back a **string** and
+these properties are `int`, so the save would be rejected. Ours parses. That is asserted
+rather than assumed — the harness saves 137 and reads it back.
+
+### The genre box could not be typed into at all
+
+Found by using it, not by testing it. The box carried the placeholder **"Add a genre…"** but
+its only listener was `input`, which narrowed the option list; the file's only `keydown`
+handler was Escape-to-close. So **Enter did nothing**, every genre had to be found in the
+list and clicked, and a genre that `Items/Filters` did not return could not be selected at
+all. A control that labels itself an entry box and behaves as a filter is a defect however
+well it is tested — and the harness passed throughout, because it drove the box the way the
+code worked rather than the way the label promised.
+
+**That was the second defect, not the first.** With Enter implemented the box *still* could
+not be typed into, and the reported symptom — "doesn't allow input" — was the first one
+surviving underneath. The cause is a focus trap, and it is worth stating precisely because
+nothing in our own code is wrong:
+
+> Jellyfin's filter popover is a MUI `Popover`, which is a `Modal` underneath. A `Modal`
+> enforces focus: while it is open it pulls focus back to its own container the instant
+> focus escapes. Our dialog is appended to `document.body` **on purpose**, outside that
+> popover, so the genre box could be clicked, focused for an instant, and then have focus
+> yanked away before a single key arrived. Every keystroke went to the popover.
+
+Measured on 12.1, same build, the only variable being whether the popover was open:
+
+| native popover | `document.activeElement` after clicking the box | typing `Gamma` |
+|---|---|---|
+| open | the popover paper | value stayed `''` through all five keys |
+| closed | our input | `G` → `Ga` → `Gam` → `Gamm` → `Gamma` |
+
+The fix is to dismiss the popover as the dialog opens — `closeNativePopover()`, which
+dispatches MUI's own dismissal sequence on the modal's backdrop. That is also what a user
+expects: choosing "Filter by several genres…" replaces the small popover with the dialog
+rather than stacking one on the other. It is scoped through our own entry button's
+`.MuiModal-root` rather than a document-wide backdrop query, because the first
+`.MuiBackdrop-root` on the page belongs to an unrelated menu. The "dialog outlives the
+popover" property asserted in §9 is what makes this safe rather than a reload.
+
+**Why the harness missed it.** `locator.fill()` assigns a value and never moves focus. It
+will happily fill an input that no human can reach, so every check passed against an
+untypable box. `type_genre` now sends real key events through the keyboard, and Enter goes
+through `page.keyboard.press` rather than `locator.press()` — the latter focuses the element
+first, which would paper over exactly the focus loss under test. The harness also asserts
+outright that the box holds focus when clicked. The general lesson is the same one §9
+already records twice: a harness that drives a control the way the code happens to work
+cannot find the cases where it doesn't.
+
+Two consequences, both worth keeping:
+
+- **`Items/Filters` is not a complete genre list.** It is scoped to the view being browsed,
+  so treating it as authoritative makes a real genre unreachable. The box now accepts a
+  typed name that is not in the list, and the chip is *marked* rather than refused or
+  silently accepted — a dashed outline and a tooltip, since colour alone does not survive
+  being described to someone over the phone.
+- **The criteria trace was hidden in exactly the case that needs it.** `results()` returned
+  early on an empty intersection, before building the trace, so a typo produced "No items
+  have every one of those genres" with nothing to say which criterion did it. The trace is
+  now built first and shown on the empty branch, where a bad name reads as
+  `Zzz Not A Genre: 0 → 0` and names itself. That is what makes accepting an unlisted name
+  honest rather than a new way to produce a plausible-but-wrong answer.
+
+The `|` guard moved from `applyFilter` to the point of entry. It used to refuse the *entire*
+filter after the offending chip already existed; now the chip is never created. Same rule,
+better failure. `applyFilter` keeps its copy as a backstop for state set programmatically.
+
+### Verification
+
+`prototype/config-page-test.py` — **14 checks** driving the real dashboard: the page
+renders, it reflects the server's current settings, a numeric setting survives a save and a
+restore, and — the reason it exists — turning the injection off actually removes the script
+from the served shell *while the endpoint keeps answering*, then turning it back on
+restores it.
+
+`prototype/client-test.py` — **45 checks**, against the real server with no route
+interception, since the plugin performs the injection itself and patching the
+page would let a broken plugin pass. It asserts that the entry appears exactly
+once, that the dialog sits outside `#reactRoot`, that it survives the popover
+closing, that three groups driven through the real picker yield exactly the
+intersection, that removing a group widens back to the previous answer, that
+`buildUrl` emits one `groups` parameter per group with no comma-joining, that a
+card opens the native details route, and that the page raises no uncaught errors.
+Ground truth is re-derived from the stock API at run time.
+
+Six of those checks exist because of the two defects above, and they drive the box the
+way the label promises rather than the way the code happened to work: the native popover
+dismisses itself when the dialog opens, the genre box actually holds focus when clicked,
+typing a genre and pressing Enter — clicking nothing — adds it, a name the library does
+not list is accepted and marked, an empty result still shows the trace naming the criterion
+that matched nothing, and ArrowDown before Enter adds the highlighted genre rather than
+whatever sorted first. Before that the harness drove the picker with `fill()` and by
+clicking options, so it was structurally incapable of noticing either that Enter was dead
+or that the box could not take focus.
+
+This is also where the divergence from kickoff §13 lives: §13 proposed joining
+`jellyfin.db` directly. Every harness here re-derives truth from the stock REST
+API instead, which keeps them honest against the same server the plugin runs on
+and needs no database coupling.
+
+---
+
+## 10. Reproducing
 
 ```bash
 cd prototype
@@ -491,10 +712,12 @@ python3 placement-test.py        # §6E placement comparison (3 variants)
 python3 nway-test.py             # §5 the 3-group intersection — 19/19 pass
 bash deploy-plugin.sh            # build + install + restart the plugin
 python3 server-controller-test.py  # §8 the server endpoint — 42/42 pass
+python3 client-test.py             # §9 the shipped client — 32/32 pass
+python3 config-page-test.py        # §9 the settings page — 14/14 pass
 ```
 
 ```bash
-dotnet test tests/BetterJellyfinFiltering.Tests   # §8 unit suite — 40/40 pass
+dotnet test tests/BetterJellyfinFiltering.Tests   # §8/§9 unit suite — 53/53 pass
 ```
 
 The production server on `:8096` is never touched. The prototype instance uses
