@@ -43,21 +43,38 @@ echo "==> restarting $CONTAINER"
 docker restart "$CONTAINER" >/dev/null
 
 echo -n "==> waiting for the server to come up"
+up=0
 for _ in $(seq 1 60); do
     if curl -fsS --max-time 3 "http://localhost:8097/System/Info/Public" >/dev/null 2>&1; then
         echo " ok"
-        # Confirm the plugin actually loaded rather than merely that the server is up.
-        if docker logs "$CONTAINER" 2>&1 | grep -qi "BetterFiltering\|Better Jellyfin Filtering"; then
-            echo "    plugin referenced in server log"
-        else
-            echo "    NOTE: plugin name not seen in the server log yet"
-        fi
-        exit 0
+        up=1
+        break
     fi
     echo -n "."
     sleep 2
 done
 
-echo " TIMED OUT" >&2
-docker logs --tail 40 "$CONTAINER" >&2
+if [[ "$up" -ne 1 ]]; then
+    echo " TIMED OUT" >&2
+    docker logs --tail 40 "$CONTAINER" >&2
+    exit 1
+fi
+
+# Confirm the plugin actually loaded rather than merely that the server is up. The log is
+# captured into a variable and matched with a case pattern instead of being piped into
+# `grep -q`: grep exits at the first match, docker then dies of SIGPIPE, and under
+# `set -o pipefail` the pipeline reports failure even though the match succeeded. That is
+# what made this check report "not seen" for a plugin that had loaded every time.
+for _ in $(seq 1 20); do
+    logs="$(docker logs "$CONTAINER" 2>&1 || true)"
+    case "$logs" in
+        *"Loaded plugin: Intersect"*)
+            echo "    plugin loaded"
+            exit 0
+            ;;
+    esac
+    sleep 0.5
+done
+
+echo "    NOTE: plugin not seen in the server log - check: docker logs $CONTAINER"
 exit 1
