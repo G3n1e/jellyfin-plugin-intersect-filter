@@ -72,13 +72,25 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
 print(f"    packed {len(paths)} files")
 PY
 
-CHECKSUM="$(sha256sum "$ZIP" | cut -d' ' -f1)"
+# The manifest's checksum field must be an MD5, and this is not a preference.
+# Jellyfin verifies the download itself in InstallationManager before extracting:
+#
+#     var hash = Convert.ToHexString(await MD5.HashDataAsync(stream, ...));
+#     if (!string.Equals(package.Checksum, hash, StringComparison.OrdinalIgnoreCase)) { ... }
+#
+# so a sha256 there fails every install with "The checksum of the received data
+# doesn't match" - and only at install time, on the user's server, long after the
+# release was cut. Uppercase hex matches what Convert.ToHexString emits, though the
+# comparison is case-insensitive.
+CHECKSUM="$(md5sum "$ZIP" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')"
+SHA256="$(sha256sum "$ZIP" | cut -d' ' -f1)"
 URL="https://github.com/G3n1e/jellyfin-plugin-intersect-filter/releases/download/v${VERSION}/intersect_${VERSION}.zip"
 
 echo
 echo "==> $ZIP"
 echo "    bytes    $(wc -c < "$ZIP")"
-echo "    sha256   $CHECKSUM"
+echo "    md5      $CHECKSUM   <- goes in manifest.json (what Jellyfin checks)"
+echo "    sha256   $SHA256   <- for release notes / human integrity checks only"
 echo
 echo "manifest.json version entry:"
 cat <<JSON

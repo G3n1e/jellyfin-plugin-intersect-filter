@@ -12,8 +12,8 @@
         "version": "0.1.0.0",
         "changelog": "First release. N-way genre intersection endpoint and the injected browse-view filter UI. Requires Jellyfin 12.1.0.",
         "targetAbi": "12.1.0.0",
-        "sourceUrl": "REPLACE_ME_when_a_release_is_published",
-        "checksum": "REPLACE_ME_with_the_sha256_of_the_release_zip",
+        "sourceUrl": "https://github.com/G3n1e/jellyfin-plugin-intersect-filter/releases/download/v0.1.0.0/intersect_0.1.0.0.zip",
+        "checksum": "FD28F075948AA8B2D26AD027EA511E4C",
         "timestamp": "2026-10-04T00:00:00.0000000Z"
       }
     ]
