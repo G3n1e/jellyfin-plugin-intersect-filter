@@ -8,7 +8,7 @@ namespace Jellyfin.Plugin.BetterFiltering;
 /// <summary>
 /// Plugin entry point.
 /// </summary>
-public class Plugin : BasePlugin<PluginConfiguration>, IHasPluginConfiguration
+public class Plugin : BasePlugin<PluginConfiguration>, IHasPluginConfiguration, IHasWebPages
 {
     /// <summary>
     /// Fixed plugin id. This MUST be a hardcoded constant: the host derives the
@@ -34,7 +34,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasPluginConfiguration
     public static Plugin? Instance { get; private set; }
 
     /// <inheritdoc />
-    public override string Name => "Better Jellyfin Filtering";
+    public override string Name => "Intersect — Multi-Criteria Filtering";
 
     /// <inheritdoc />
     public override string Description =>
@@ -44,4 +44,20 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasPluginConfiguration
 
     /// <inheritdoc />
     public override Guid Id => PluginId;
+
+    /// <inheritdoc />
+    public IEnumerable<PluginPageInfo> GetPages()
+    {
+        return
+        [
+            new PluginPageInfo
+            {
+                // Deliberately not the display name: this becomes a URL parameter
+                // ("configurationpage?name=..."), and the display name carries an em dash
+                // and spaces for no benefit here.
+                Name = "Intersect",
+                EmbeddedResourcePath = GetType().Namespace + ".Configuration.configPage.html"
+            }
+        ];
+    }
 }

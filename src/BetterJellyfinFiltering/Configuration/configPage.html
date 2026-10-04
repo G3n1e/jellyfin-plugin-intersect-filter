@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Intersect</title>
+</head>
+<body>
+    <div id="IntersectConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+        <div data-role="content">
+            <div class="content-primary">
+                <form id="IntersectConfigForm">
+
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label class="emby-checkbox-label">
+                            <input id="InjectClientScript" name="InjectClientScript" type="checkbox" is="emby-checkbox" />
+                            <span>Show the filter UI in the web client</span>
+                        </label>
+                        <div class="fieldDescription">
+                            Injects the multi-genre filter button into the web client's filter panel.
+                            The intersection endpoint stays available either way &mdash; turning this off
+                            only removes the button, so it is the recovery step if a Jellyfin web-client
+                            upgrade ever breaks the page: untick this and the client goes back to stock
+                            without uninstalling the plugin. Takes effect on the next page load.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="MaxCriterionIds">Maximum items per genre</label>
+                        <input id="MaxCriterionIds" name="MaxCriterionIds" type="number" is="emby-input" min="1" step="1" />
+                        <div class="fieldDescription">
+                            A guard rail, not a page size. If a single genre resolves to more items than
+                            this, the request is refused with an error rather than truncated. A truncated
+                            genre list would still intersect to a plausible-looking number that is simply
+                            wrong, which is worse than failing.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="DefaultPageSize">Results per page</label>
+                        <input id="DefaultPageSize" name="DefaultPageSize" type="number" is="emby-input" min="1" step="1" />
+                        <div class="fieldDescription">
+                            How many items to return when a request does not ask for a specific page size.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="MaxPageSize">Largest page a caller may request</label>
+                        <input id="MaxPageSize" name="MaxPageSize" type="number" is="emby-input" min="1" step="1" />
+                        <div class="fieldDescription">
+                            An upper bound on the page size parameter. Requests above it are rejected
+                            rather than quietly served a smaller page.
+                        </div>
+                    </div>
+
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <script type="text/javascript">
+            var IntersectConfig = {
+                pluginUniqueId: '8f3c1a52-6d24-4b7e-9c8a-1f2e3d4c5b6a'
+            };
+
+            document.querySelector('#IntersectConfigPage')
+                .addEventListener('pageshow', function () {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(IntersectConfig.pluginUniqueId).then(function (config) {
+                        // !== false rather than a plain truthiness test: if the server ever omits
+                        // the property the plugin's own default is "on", and a plain test would
+                        // show it as off and then silently save it off.
+                        document.querySelector('#InjectClientScript').checked = config.InjectClientScript !== false;
+                        document.querySelector('#MaxCriterionIds').value = config.MaxCriterionIds;
+                        document.querySelector('#DefaultPageSize').value = config.DefaultPageSize;
+                        document.querySelector('#MaxPageSize').value = config.MaxPageSize;
+                        Dashboard.hideLoadingMsg();
+                    });
+                });
+
+            document.querySelector('#IntersectConfigForm')
+                .addEventListener('submit', function (e) {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(IntersectConfig.pluginUniqueId).then(function (config) {
+                        config.InjectClientScript = document.querySelector('#InjectClientScript').checked;
+                        // Parsed to numbers, not assigned as the input's string value. An <input>
+                        // hands back a string, and the server's properties are ints - a JSON
+                        // string there fails to deserialize and the save is rejected.
+                        config.MaxCriterionIds = parseInt(document.querySelector('#MaxCriterionIds').value, 10);
+                        config.DefaultPageSize = parseInt(document.querySelector('#DefaultPageSize').value, 10);
+                        config.MaxPageSize = parseInt(document.querySelector('#MaxPageSize').value, 10);
+                        ApiClient.updatePluginConfiguration(IntersectConfig.pluginUniqueId, config).then(function (result) {
+                            Dashboard.processPluginConfigurationUpdateResult(result);
+                        });
+                    });
+
+                    e.preventDefault();
+                    return false;
+                });
+        </script>
+    </div>
+</body>
+</html>

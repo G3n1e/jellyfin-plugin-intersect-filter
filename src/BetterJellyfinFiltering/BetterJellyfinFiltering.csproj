@@ -14,6 +14,21 @@
 
   <ItemGroup>
     <!--
+      The client script is embedded rather than copied next to the DLL. An installed plugin
+      folder is replaced wholesale, and the deploy script sweeps only *.dll and *.json, so a
+      loose .js file would survive an upgrade and go stale against the server it ships with.
+    -->
+    <EmbeddedResource Include="Client/intersect-client.js" />
+    <!--
+      The settings page is embedded for the same reason the client script is: the host
+      serves it out of the assembly, addressed by the resource name built in Plugin.GetPages,
+      so a loose file next to the DLL would never be found.
+    -->
+    <EmbeddedResource Include="Configuration/configPage.html" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
       ExcludeAssets="runtime" is deliberate and important: these assemblies are
       supplied by the host server. Copying them into the plugin folder would let
       a stale Jellyfin.Controller.dll shadow the server's own, which produces

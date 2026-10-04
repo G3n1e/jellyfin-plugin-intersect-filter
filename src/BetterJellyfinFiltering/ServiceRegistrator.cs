@@ -1,6 +1,8 @@
+using Jellyfin.Plugin.BetterFiltering.Client;
 using Jellyfin.Plugin.BetterFiltering.Services;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Jellyfin.Plugin.BetterFiltering;
@@ -21,5 +23,12 @@ public class ServiceRegistrator : IPluginServiceRegistrator
         ArgumentNullException.ThrowIfNull(serviceCollection);
 
         serviceCollection.AddSingleton<GenreIntersectionService>();
+        serviceCollection.AddSingleton<ClientScriptProvider>();
+
+        // The server's own pipeline serves the web client's index.html, and a plugin has no
+        // other hook into it, so the script is spliced into that response as it goes out.
+        // Registered as an IStartupFilter so it wraps the whole pipeline and therefore runs
+        // on the way out of the static-file handler, which is where the body exists.
+        serviceCollection.AddSingleton<IStartupFilter, ScriptInjectingStartupFilter>();
     }
 }
