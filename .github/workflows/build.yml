@@ -1,0 +1,99 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # TreatWarningsAsErrors is on in Directory.Build.props, so this fails on analyser
+      # warnings as well as errors.
+      - name: Build
+        run: dotnet build src/BetterJellyfinFiltering -c Release
+
+      - name: Test
+        run: dotnet test tests/BetterJellyfinFiltering.Tests -c Release
+
+      # The plugin ABI is the server AssemblyVersion. If it does not match the Jellyfin
+      # version this repo claims to target, Jellyfin refuses to load the plugin - and the
+      # failure is a silent "not in the list", not an error. Cheaper to catch here.
+      - name: Check targetAbi matches the declared Jellyfin version
+        run: |
+          set -euo pipefail
+          declared="$(sed -n 's:.*<JellyfinVersion>\(.*\)</JellyfinVersion>.*:\1:p' Directory.Build.props)"
+          abi="$(python3 -c "import json;print(json.load(open('manifest.json'))[0]['versions'][0]['targetAbi'])")"
+          meta="$(python3 -c "import json;print(json.load(open('src/BetterJellyfinFiltering/meta.json'))['targetAbi'])")"
+          echo "Directory.Build.props JellyfinVersion = $declared"
+          echo "manifest.json targetAbi             = $abi"
+          echo "meta.json targetAbi                 = $meta"
+          test "$abi" = "$declared.0" || { echo "::error::manifest.json targetAbi does not match JellyfinVersion"; exit 1; }
+          test "$meta" = "$declared.0" || { echo "::error::meta.json targetAbi does not match JellyfinVersion"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin
+          path: |
+            src/BetterJellyfinFiltering/bin/Release/net10.0/Jellyfin.Plugin.BetterFiltering.dll
+            src/BetterJellyfinFiltering/meta.json
+
+  # The web client is the fragile surface: this plugin rewrites /web/index.html as it is
+  # served, against an unsupported hook. A new Jellyfin release is the event that breaks it,
+  # so the point of this job is to say so on the day it happens rather than when a user
+  # reports a missing button.
+  upstream-check:
+    name: is there a newer Jellyfin
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare against the latest Jellyfin release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          declared="$(sed -n 's:.*<JellyfinVersion>\(.*\)</JellyfinVersion>.*:\1:p' Directory.Build.props)"
+          latest="$(gh api repos/jellyfin/jellyfin/releases/latest --jq .tag_name | sed 's/^v//')"
+          echo "declared=$declared latest=$latest"
+          if [ "$latest" = "$declared" ]; then
+            echo "Up to date."
+            exit 0
+          fi
+          title="Jellyfin $latest released; this plugin targets $declared"
+          existing="$(gh issue list --state open --search "\"$title\" in:title" --json number --jq 'length')"
+          if [ "$existing" != "0" ]; then
+            echo "Issue already open."
+            exit 0
+          fi
+          gh issue create --title "$title" --body "$(cat <<EOF
+          Jellyfin **$latest** is released. This plugin declares \`$declared\`.
+
+          The server API is expected to keep working. The **web client injection is the part
+          that breaks** — see \`docs/ARCHITECTURE.md\` §4 for the upgrade playbook and the list
+          of anchors to re-check.
+
+          Checklist:
+
+          - [ ] Diff \`jellyfin-web\`'s \`index.html\` — does it still contain \`</body>\`?
+          - [ ] Diff the filter popover anchors (\`#filtersGenres-header\`, \`.MuiPopover-paper\`, \`#filter-popover\`)
+          - [ ] Check the MUI version (the focus-trap behaviour in ARCHITECTURE §3.4 depends on it)
+          - [ ] Bump \`JellyfinVersion\` in \`Directory.Build.props\`
+          - [ ] Bump \`targetAbi\` in \`meta.json\` and \`manifest.json\`
+          - [ ] Run the harnesses against a \`$latest\` instance
+          - [ ] Cut a plugin release and update \`CHANGELOG.md\`
+          EOF
+          )"
+          echo "Issue created."

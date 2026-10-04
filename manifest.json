@@ -1,0 +1,21 @@
+[
+  {
+    "guid": "8f3c1a52-6d24-4b7e-9c8a-1f2e3d4c5b6a",
+    "name": "Intersect — Multi-Criteria Filtering",
+    "description": "Filter a Jellyfin library by several genres at once — movies that are both Action and Comedy, not Action or Comedy.",
+    "overview": "Jellyfin's /Items endpoint ANDs across parameters and ORs within one, so it can intersect at most two genre groups and the stock filter UI exposes only the OR half of that. This plugin removes the ceiling: pick any number of genre groups and browse only the items carrying a genre from every one, live in the browse view. It does not change search, ranking or text matching — it is set intersection over the genre metadata you already have.",
+    "owner": "G3n1e",
+    "category": "General",
+    "imageUrl": "",
+    "versions": [
+      {
+        "version": "0.1.0.0",
+        "changelog": "First release. N-way genre intersection endpoint and the injected browse-view filter UI. Requires Jellyfin 12.1.0.",
+        "targetAbi": "12.1.0.0",
+        "sourceUrl": "REPLACE_ME_when_a_release_is_published",
+        "checksum": "REPLACE_ME_with_the_sha256_of_the_release_zip",
+        "timestamp": "2026-10-04T00:00:00.0000000Z"
+      }
+    ]
+  }
+]

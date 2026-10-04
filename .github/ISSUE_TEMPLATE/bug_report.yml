@@ -1,0 +1,96 @@
+name: Bug report
+description: Something broke, or the filter button is missing
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The expected failure for this plugin is **"it broke after I updated Jellyfin"**. The
+        versions below are what makes that diagnosable — the injection is tied to the web
+        client's exact shape, so a report without them usually cannot be acted on.
+
+        If the button is simply missing, the recovery is in the README under
+        *If it breaks after a Jellyfin upgrade* — you can turn the injection off from
+        Dashboard → Plugins → Intersect without uninstalling anything.
+
+  - type: input
+    id: jellyfin-version
+    attributes:
+      label: Jellyfin version
+      description: Dashboard → General, or the version shown at the top of the dashboard sidebar.
+      placeholder: "12.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: Dashboard → Plugins → Intersect.
+      placeholder: "0.1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: web-build
+    attributes:
+      label: Web client build
+      description: |
+        Open your Jellyfin web UI and press F12 → Console, then run `window.ApiClient.appVersion`
+        — or read the build hash from the `#/` URL if your server shows one. If you cannot get
+        this, say so; the Jellyfin version alone is still useful.
+      placeholder: "e.g. eed478c834840450f1de, or 'could not determine'"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: upgrade
+    attributes:
+      label: Did this start after a Jellyfin upgrade?
+      options:
+        - "Yes — it worked before I updated"
+        - "No — it has never worked on this install"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: What is broken
+      options:
+        - The filter button is missing entirely
+        - The button is there but the dialog will not open
+        - The dialog opens but the genre box will not accept typing
+        - Results are wrong (a filter matches items it should not, or misses items it should)
+        - The settings page
+        - The /BetterJellyfinFiltering/Intersect API
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happens, and what you expected
+      description: |
+        If it is a wrong-result report, the exact groups you used and what you expected would
+        help enormously — the criteria line under the results names each group's count, so a
+        screenshot of that is ideal.
+      placeholder: |
+        I set Group 1 to Action and Group 2 to Comedy, and expected only films that are both...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant server log
+      description: |
+        Dashboard → Logs, or `docker logs <container>` around the time it broke. If the plugin
+        failed to load at all, the log line will say so — that is the single most useful thing
+        you can paste.
+      render: shell
+    validations:
+      required: false

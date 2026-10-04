@@ -30,3 +30,6 @@ coverage/
 # OS
 .DS_Store
 Thumbs.db
+
+# Release zips built by tools/make-release.sh
+artifacts/
